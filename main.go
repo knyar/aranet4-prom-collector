@@ -19,6 +19,7 @@ var (
 	hostname, _ = os.Hostname()
 
 	verbose       = flag.Bool("verbose", false, "Verbose logging")
+	sinceTime     = flag.String("since", "", "Start time for historical data")
 	deviceAddr    = flag.String("addr", "F5:6C:BE:D5:61:47", "MAC address of Aranet4")
 	interval      = flag.Duration("interval", time.Hour, "How often to read data from Aranet4")
 	metricPrefix  = flag.String("prefix", "aranet4_", "Prefix for metrics")
@@ -33,10 +34,19 @@ func main() {
 	if *verbose {
 		slog.SetLogLoggerLevel(slog.LevelDebug)
 	}
+	var since time.Time
+	if *sinceTime != "" {
+		var err error
+		since, err = time.Parse(time.RFC3339, *sinceTime)
+		if err != nil {
+			slog.Error("failed to parse since time", "error", err)
+			os.Exit(1)
+		}
+	}
 
 	slog.Info("starting Aranet4 Prometheus collector", "device-addr", *deviceAddr, "interval", *interval, "metric-prefix", *metricPrefix, "write-endpoint", *writeEndpoint, "job-name", *jobName, "instance-name", *instanceName)
 
-	last, err := refresh(time.Time{})
+	last, err := refresh(since)
 	if err != nil {
 		slog.Error("failed to refresh", "error", err)
 		os.Exit(1)
@@ -47,6 +57,9 @@ func main() {
 		if waitFor > 0 {
 			slog.Info("waiting for next interval", "wait_for", waitFor)
 			time.Sleep(waitFor)
+		} else {
+			// Keep retrying if we're behind schedule.
+			time.Sleep(time.Second)
 		}
 		if l, err := refresh(last); err != nil {
 			slog.Error("failed to refresh", "error", err)
@@ -56,7 +69,14 @@ func main() {
 	}
 }
 
-func refresh(prev time.Time) (time.Time, error) {
+func refresh(prev time.Time) (retTime time.Time, retErr error) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("panic in refresh", "error", r)
+			retTime = prev
+			retErr = fmt.Errorf("panic in refresh: %v", r)
+		}
+	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	client := promwrite.NewClient(*writeEndpoint)
@@ -80,6 +100,7 @@ func refresh(prev time.Time) (time.Time, error) {
 	slices.SortFunc(all, func(a, b aranet4.Data) int {
 		return a.Time.Compare(b.Time)
 	})
+	lastTime := prev
 	for _, data := range all {
 		if !prev.IsZero() && !data.Time.After(prev) {
 			continue
@@ -100,10 +121,12 @@ func refresh(prev time.Time) (time.Time, error) {
 		if err := reportData(ctx, client, &data); err != nil {
 			return prev, fmt.Errorf("reporting data: %w", err)
 		}
+		lastTime = data.Time
 	}
-	lastTime := all[len(all)-1].Time
-	if err := reportMetric(ctx, client, "last_success_time_seconds", lastTime, float64(lastTime.Unix())); err != nil {
-		return prev, fmt.Errorf("reporting last success time: %w", err)
+	if !lastTime.IsZero() {
+		if err := reportMetric(ctx, client, "last_success_time_seconds", lastTime, float64(lastTime.Unix())); err != nil {
+			return prev, fmt.Errorf("reporting last success time: %w", err)
+		}
 	}
 	return lastTime, nil
 }
@@ -155,6 +178,17 @@ func reportData(ctx context.Context, client *promwrite.Client, data *aranet4.Dat
 }
 
 func reportMetric(ctx context.Context, client *promwrite.Client, name string, ts time.Time, value float64) error {
+	// Validate timestamp - must not be zero
+	if ts.IsZero() {
+		return fmt.Errorf("cannot report metric %q with zero timestamp", name)
+	}
+	// Reject timestamps more than 1 hour in the future (likely clock sync issue)
+	// Allow old timestamps for historical data
+	now := time.Now()
+	if ts.After(now.Add(time.Hour)) {
+		return fmt.Errorf("timestamp %v for metric %q is too far in the future (more than 1 hour ahead of now)", ts, name)
+	}
+
 	req := &prompb.WriteRequest{
 		Timeseries: []prompb.TimeSeries{
 			{
