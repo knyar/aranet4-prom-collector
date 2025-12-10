@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log"
 	"log/slog"
 	"os"
 	"slices"
@@ -12,15 +13,22 @@ import (
 
 	"github.com/castai/promwrite"
 	"github.com/prometheus/prometheus/prompb"
+	"github.com/rigado/ble"
+	"github.com/rigado/ble/linux"
+	bonds "github.com/rigado/ble/linux/hci/bond"
 	"sbinet.org/x/aranet4"
 )
 
 var (
 	hostname, _ = os.Hostname()
 
-	verbose       = flag.Bool("verbose", false, "Verbose logging")
+	verbose = flag.Bool("verbose", false, "Verbose logging")
+
+	hciSkt     = flag.Int("device", -1, "hci index")
+	btBondFile = flag.String("bt-bonds-file", "bonds.json", "Bluetooth bond state file")
+	deviceAddr = flag.String("addr", "F5:6C:BE:D5:61:47", "MAC address of Aranet4")
+
 	sinceTime     = flag.String("since", "", "Start time for historical data")
-	deviceAddr    = flag.String("addr", "F5:6C:BE:D5:61:47", "MAC address of Aranet4")
 	interval      = flag.Duration("interval", time.Hour, "How often to read data from Aranet4")
 	metricPrefix  = flag.String("prefix", "aranet4_", "Prefix for metrics")
 	writeEndpoint = flag.String("write-endpoint", "http://localhost:9090/api/v1/write", "Prometheus Remote Write API endpoint for metrics")
@@ -131,12 +139,37 @@ func refresh(prev time.Time) (retTime time.Time, retErr error) {
 	return lastTime, nil
 }
 
+func passkey() int {
+	// prompt for passkey
+	fmt.Print("Enter passkey: ")
+	var p int
+	n, err := fmt.Scanf("%d", &p)
+	if err != nil || n != 1 {
+		log.Printf("ERROR: expected 1 integer; got %d values (%v)", n, err)
+		return passkey()
+	}
+	return p
+}
+
 func readData(ctx context.Context) (latest *aranet4.Data, all []aranet4.Data, _ error) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
+	bm := bonds.NewBondManager(*btBondFile)
+
+	d, err := linux.NewDevice(
+		ble.OptEnableSecurity(bm),
+		ble.OptTransportHCISocket(*hciSkt),
+		ble.OptDialerTimeout(10*time.Second),
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("can't init device: %w", err)
+	}
+	ble.SetDefaultDevice(d)
+	defer d.Stop()
+
 	slog.Debug("connecting to device", "device-addr", *deviceAddr)
-	device, err := aranet4.New(ctx, *deviceAddr)
+	device, err := aranet4.New(ctx, *deviceAddr, aranet4.WithPasskey(passkey))
 	if err != nil {
 		return nil, nil, fmt.Errorf("connecting to device: %w", err)
 	}
