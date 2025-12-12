@@ -2,9 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"flag"
 	"fmt"
-	"log"
 	"log/slog"
 	"os"
 	"slices"
@@ -145,7 +145,7 @@ func passkey() int {
 	var p int
 	n, err := fmt.Scanf("%d", &p)
 	if err != nil || n != 1 {
-		log.Printf("ERROR: expected 1 integer; got %d values (%v)", n, err)
+		fmt.Printf("ERROR: expected 1 integer; got %d values (%v)\n", n, err)
 		return passkey()
 	}
 	return p
@@ -174,6 +174,24 @@ func readData(ctx context.Context) (latest *aranet4.Data, all []aranet4.Data, _ 
 		return nil, nil, fmt.Errorf("connecting to device: %w", err)
 	}
 	defer device.Close()
+
+	// Start encryption.
+	addr := device.Client().Addr().Bytes()
+	// Reverse the address bytes (Bluetooth addresses are stored in little-endian,
+	// but the bond manager expects big-endian format)
+	slices.Reverse(addr)
+	for !bm.Exists(hex.EncodeToString(addr)) {
+		slog.Warn("no bond found, pairing")
+		if err := device.Client().Pair(ble.AuthData{}, 2*time.Minute); err != nil {
+			return nil, nil, fmt.Errorf("pairing: %w", err)
+		}
+	}
+
+	slog.Debug("starting encryption")
+	m := make(chan ble.EncryptionChangedInfo)
+	if err := device.Client().StartEncryption(m); err != nil {
+		return nil, nil, fmt.Errorf("starting encryption: %w", err)
+	}
 
 	slog.Debug("reading latest data")
 	data, err := device.Read()
