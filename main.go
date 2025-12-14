@@ -5,8 +5,10 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
+	"html/template"
 	"log/slog"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"slices"
 	"time"
@@ -26,15 +28,16 @@ import (
 var (
 	hostname, _ = os.Hostname()
 
-	verbose = flag.Bool("verbose", false, "Verbose logging")
-	dryRun  = flag.Bool("dry-run", false, "Dry run mode")
-	listen  = flag.String("listen", ":9090", "Listen address for HTTP server")
+	verbose  = flag.Bool("verbose", false, "Verbose logging")
+	dryRun   = flag.Bool("dry-run", false, "Dry run mode")
+	listen   = flag.String("listen", ":9090", "Listen address for HTTP server")
+	interval = flag.Duration("interval", time.Hour, "How often to sync data from Aranet4 to Prometheus")
+	timeout  = flag.Duration("timeout", 5*time.Minute, "Timeout for a single refresh operations")
 
 	hciSocketID = flag.Int("hci-socket-id", -1, "hci device socket ID")
 	deviceAddr  = flag.String("addr", "F5:6C:BE:D5:61:47", "MAC address of Aranet4")
 	btBondFile  = flag.String("bt-bonds-file", "bonds.json", "Bluetooth bond state file: written when pairing is successful")
 
-	interval     = flag.Duration("interval", time.Hour, "How often to sync data from Aranet4 to Prometheus")
 	metricPrefix = flag.String("prefix", "aranet4_", "Prefix for metrics")
 	promEndpoint = flag.String("prometheus-url", "http://localhost:9090/", "Prometheus base URL")
 	jobName      = flag.String("job", "aranet4", "Job name for metrics")
@@ -46,6 +49,14 @@ func main() {
 
 	if *verbose {
 		slog.SetLogLoggerLevel(slog.LevelDebug)
+	}
+	if *interval <= 0 {
+		slog.Error("interval must be greater than 0", "interval", *interval)
+		os.Exit(1)
+	}
+	if *timeout <= 0 || *timeout > *interval {
+		slog.Error("timeout must be greater than 0 and less than interval", "timeout", *timeout, "interval", *interval)
+		os.Exit(1)
 	}
 
 	prom, err := promsync.New(promsync.Config{
@@ -70,7 +81,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	c.run()
+	c.loop()
 }
 
 type collector struct {
@@ -83,19 +94,25 @@ type collector struct {
 	lastReported syncs.AtomicValue[time.Time]
 
 	attempts *prometheus.HistogramVec
+
+	// template for the status page
+	tmpl *template.Template
 }
 
 func newCollector(prom *promsync.Syncer) (*collector, error) {
+	tmpl, err := template.ParseFS(staticFiles, "index.html")
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse template: %w", err)
+	}
+
 	c := &collector{
 		prom: prom,
+		tmpl: tmpl,
 		attempts: promauto.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    *metricPrefix + "refresh_latencies_seconds",
 			Help:    "Latencies of refresh attempts.",
 			Buckets: prometheus.ExponentialBucketsRange(1, 120, 5),
 		}, []string{"status"}),
-	}
-	if err := c.refresh(); err != nil {
-		return nil, fmt.Errorf("failed to refresh: %w", err)
 	}
 	promauto.NewGaugeFunc(prometheus.GaugeOpts{
 		Name: *metricPrefix + "last_success_time_seconds",
@@ -109,10 +126,14 @@ func newCollector(prom *promsync.Syncer) (*collector, error) {
 	go func() {
 		http.ListenAndServe(*listen, nil)
 	}()
+
+	if err := c.refresh(); err != nil {
+		return nil, fmt.Errorf("failed to refresh: %w", err)
+	}
 	return c, nil
 }
 
-func (c *collector) run() {
+func (c *collector) loop() {
 	for {
 		waitFor := time.Until(c.lastSuccess.Load().Add(*interval))
 		if waitFor > 0 {
@@ -130,7 +151,14 @@ func (c *collector) run() {
 
 func (c *collector) refresh() (retErr error) {
 	t0 := time.Now()
+
+	t := time.AfterFunc(*timeout*2, func() {
+		slog.Error("refresh took too long; exiting", "timeout", *timeout, "duration", time.Since(t0))
+		os.Exit(1)
+	})
+
 	defer func() {
+		t.Stop()
 		if r := recover(); r != nil {
 			slog.Error("panic in refresh", "error", r)
 			retErr = fmt.Errorf("panic in refresh: %v", r)
@@ -141,7 +169,7 @@ func (c *collector) refresh() (retErr error) {
 		}
 		c.attempts.WithLabelValues(status).Observe(time.Since(t0).Seconds())
 	}()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
 	latest, all, err := c.readData(ctx)
@@ -191,9 +219,6 @@ func (c *collector) refresh() (retErr error) {
 }
 
 func (c *collector) readData(ctx context.Context) (latest *aranet4.Data, all []aranet4.Data, _ error) {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
-
 	bm := bonds.NewBondManager(*btBondFile)
 
 	d, err := linux.NewDevice(
@@ -266,10 +291,6 @@ func (c *collector) reportData(ctx context.Context, data *aranet4.Data) error {
 		return fmt.Errorf("reporting temperature: %w", err)
 	}
 	return nil
-}
-
-func (c *collector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-
 }
 
 func (c *collector) passkey(ctx context.Context) int {
