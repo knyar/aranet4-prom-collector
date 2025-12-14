@@ -40,6 +40,7 @@ var (
 	hciSocketID = flag.Int("hci-socket-id", -1, "hci device socket ID")
 	deviceAddr  = flag.String("addr", "F5:6C:BE:D5:61:47", "MAC address of Aranet4")
 	btBondFile  = flag.String("bt-bonds-file", "bonds.json", "Bluetooth bond state file: written when pairing is successful")
+	passkeyMode = flag.String("passkey-mode", "auto", "Determines how passkey is requested at pairint time (auto, web, terminal")
 
 	metricPrefix = flag.String("prefix", "aranet4_", "Prefix for metrics")
 	promEndpoint = flag.String("prometheus-url", "http://localhost:9090/", "Prometheus base URL")
@@ -59,6 +60,11 @@ func main() {
 	}
 	if *timeout <= 0 || *timeout > *interval {
 		slog.Error("timeout must be greater than 0 and less than interval", "timeout", *timeout, "interval", *interval)
+		os.Exit(1)
+	}
+
+	if *passkeyMode != "auto" && *passkeyMode != "web" && *passkeyMode != "terminal" {
+		slog.Error("invalid passkey mode", "passkey-mode", *passkeyMode)
 		os.Exit(1)
 	}
 
@@ -302,7 +308,8 @@ func (c *collector) reportData(ctx context.Context, data *aranet4.Data) error {
 
 // passkey prompts the user for a passkey.
 func (c *collector) passkey(ctx context.Context) int {
-	if isatty.IsTerminal(os.Stdin.Fd()) {
+	m := *passkeyMode
+	if m == "terminal" || (m == "auto" && isatty.IsTerminal(os.Stdin.Fd())) {
 		return c.passkeyFromTerminal(ctx)
 	}
 	return c.passkeyFromWeb(ctx)
@@ -314,8 +321,8 @@ func (c *collector) passkeyFromWeb(ctx context.Context) int {
 	c.passkeyChan.Store(pk)
 	defer c.passkeyChan.Store(nil)
 
-	port := strings.Split(*listen, ":")[1]
-	log.Printf("Please enter passkey at http://%s:%d/", hostname, port)
+	addrport := strings.Split(*listen, ":")
+	log.Printf("Please enter passkey at http://%s:%s/", hostname, addrport[len(addrport)-1])
 	select {
 	case <-ctx.Done():
 		return 0
