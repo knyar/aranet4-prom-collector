@@ -5,6 +5,7 @@ go 1.25.5
 require (
 	github.com/castai/promwrite v0.6.0
 	github.com/knyar/aranet4-ble v0.0.0-20251214095731-3f83aad3b16a
+	github.com/mattn/go-isatty v0.0.20
 	github.com/prometheus/client_golang v1.23.0
 	github.com/prometheus/common v0.67.4
 	github.com/prometheus/prometheus v0.304.1

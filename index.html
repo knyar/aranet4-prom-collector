@@ -66,11 +66,63 @@
             color: #999;
             font-style: italic;
         }
+        .passkey-form {
+            background: #fff3cd;
+            border-left: 4px solid #ffc107;
+            padding: 20px;
+            border-radius: 4px;
+            margin-top: 20px;
+        }
+        .passkey-form h3 {
+            margin: 0 0 15px 0;
+            color: #856404;
+            font-size: 16px;
+        }
+        .passkey-form form {
+            display: flex;
+            gap: 10px;
+            align-items: flex-end;
+        }
+        .passkey-form input[type="number"] {
+            flex: 1;
+            padding: 10px;
+            font-size: 16px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            max-width: 200px;
+        }
+        .passkey-form button {
+            padding: 10px 20px;
+            font-size: 16px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .passkey-form button:hover {
+            background-color: #45a049;
+        }
+        .passkey-form button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>Aranet4 Prometheus Collector</h1>
+        
+        {{if .WantPasskey}}
+        <div class="passkey-form">
+            <h3>Bluetooth Pairing Required</h3>
+            <p>Please enter the passkey displayed on your Aranet4 device:</p>
+            <form method="POST" action="/" onsubmit="this.querySelector('button').disabled=true; return true;">
+                <input type="number" name="passkey" id="passkey" placeholder="Enter passkey" required min="0" max="999999" autofocus>
+                <button type="submit">Submit</button>
+            </form>
+        </div>
+        {{end}}
         
         <div class="status-grid">
             <div class="status-card">

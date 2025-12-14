@@ -6,11 +6,13 @@ import (
 	"flag"
 	"fmt"
 	"html/template"
+	"log"
 	"log/slog"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/knyar/aranet4-ble"
@@ -23,6 +25,7 @@ import (
 	"tailscale.com/syncs"
 
 	"github.com/knyar/aranet4-prom-collector/promsync"
+	"github.com/mattn/go-isatty"
 )
 
 var (
@@ -86,6 +89,8 @@ func main() {
 
 type collector struct {
 	prom *promsync.Syncer
+	// tmpl is the template for the status page.
+	tmpl *template.Template
 
 	// lastSuccess is the last time the collector successfully refreshed data.
 	lastSuccess syncs.AtomicValue[time.Time]
@@ -93,10 +98,10 @@ type collector struct {
 	// lastReported is the timestamp of the last reported measurement.
 	lastReported syncs.AtomicValue[time.Time]
 
+	// attempts is a histogram of refresh attempts.
 	attempts *prometheus.HistogramVec
 
-	// template for the status page
-	tmpl *template.Template
+	passkeyChan syncs.AtomicValue[chan int]
 }
 
 func newCollector(prom *promsync.Syncer) (*collector, error) {
@@ -293,14 +298,42 @@ func (c *collector) reportData(ctx context.Context, data *aranet4.Data) error {
 	return nil
 }
 
+// passkey prompts the user for a passkey.
 func (c *collector) passkey(ctx context.Context) int {
-	// prompt for passkey
+	if isatty.IsTerminal(os.Stdin.Fd()) {
+		return c.passkeyFromTerminal(ctx)
+	}
+	return c.passkeyFromWeb(ctx)
+}
+
+// passkeyFromWeb prompts the user for a passkey via a web page.
+func (c *collector) passkeyFromWeb(ctx context.Context) int {
+	pk := make(chan int)
+	c.passkeyChan.Store(pk)
+	defer c.passkeyChan.Store(nil)
+
+	port := strings.Split(*listen, ":")[1]
+	log.Printf("Please enter passkey at http://%s:%d/", hostname, port)
+	select {
+	case <-ctx.Done():
+		return 0
+	case k, ok := <-pk:
+		if !ok {
+			slog.Error("passkey channel closed")
+			return 0
+		}
+		return k
+	}
+}
+
+// passkeyFromTerminal prompts the user for a passkey from the terminal.
+func (c *collector) passkeyFromTerminal(ctx context.Context) int {
 	fmt.Print("Enter passkey: ")
 	var p int
 	n, err := fmt.Scanf("%d", &p)
 	if err != nil || n != 1 {
 		fmt.Printf("ERROR: expected 1 integer; got %d values (%v)\n", n, err)
-		return c.passkey(ctx)
+		return c.passkeyFromTerminal(ctx)
 	}
 	return p
 }
