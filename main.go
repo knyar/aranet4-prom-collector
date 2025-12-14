@@ -8,11 +8,8 @@ import (
 	"log/slog"
 	"os"
 	"slices"
-	"strings"
 	"time"
 
-	"github.com/castai/promwrite"
-	"github.com/prometheus/prometheus/prompb"
 	"github.com/rigado/ble"
 	"github.com/rigado/ble/linux"
 	bonds "github.com/rigado/ble/linux/hci/bond"
@@ -23,17 +20,17 @@ var (
 	hostname, _ = os.Hostname()
 
 	verbose = flag.Bool("verbose", false, "Verbose logging")
+	dryRun  = flag.Bool("dry-run", false, "Dry run mode")
 
 	hciSkt     = flag.Int("device", -1, "hci index")
 	btBondFile = flag.String("bt-bonds-file", "bonds.json", "Bluetooth bond state file")
 	deviceAddr = flag.String("addr", "F5:6C:BE:D5:61:47", "MAC address of Aranet4")
 
-	sinceTime     = flag.String("since", "", "Start time for historical data")
-	interval      = flag.Duration("interval", time.Hour, "How often to read data from Aranet4")
-	metricPrefix  = flag.String("prefix", "aranet4_", "Prefix for metrics")
-	writeEndpoint = flag.String("write-endpoint", "http://localhost:9090/api/v1/write", "Prometheus Remote Write API endpoint for metrics")
-	jobName       = flag.String("job", "aranet4", "Job name for metrics")
-	instanceName  = flag.String("instance", hostname, "Instance name for metrics")
+	interval     = flag.Duration("interval", time.Hour, "How often to read data from Aranet4")
+	metricPrefix = flag.String("prefix", "aranet4_", "Prefix for metrics")
+	promEndpoint = flag.String("prometheus-url", "http://localhost:9090/", "Prometheus base URL")
+	jobName      = flag.String("job", "aranet4", "Job name for metrics")
+	instanceName = flag.String("instance", hostname, "Instance name for metrics")
 )
 
 func main() {
@@ -42,26 +39,23 @@ func main() {
 	if *verbose {
 		slog.SetLogLoggerLevel(slog.LevelDebug)
 	}
-	var since time.Time
-	if *sinceTime != "" {
-		var err error
-		since, err = time.Parse(time.RFC3339, *sinceTime)
-		if err != nil {
-			slog.Error("failed to parse since time", "error", err)
-			os.Exit(1)
-		}
+
+	prom, err := newPromSyncer(*promEndpoint, *dryRun)
+	if err != nil {
+		slog.Error("failed to create Prometheus syncer", "error", err)
+		os.Exit(1)
 	}
 
-	slog.Info("starting Aranet4 Prometheus collector", "device-addr", *deviceAddr, "interval", *interval, "metric-prefix", *metricPrefix, "write-endpoint", *writeEndpoint, "job-name", *jobName, "instance-name", *instanceName)
+	slog.Info("starting Aranet4 Prometheus collector", "device-addr", *deviceAddr)
 
-	last, err := refresh(since)
-	if err != nil {
+	if err := refresh(prom); err != nil {
 		slog.Error("failed to refresh", "error", err)
 		os.Exit(1)
 	}
 
+	lastSuccess := time.Now()
 	for {
-		waitFor := time.Until(last.Add(*interval))
+		waitFor := time.Until(lastSuccess.Add(*interval))
 		if waitFor > 0 {
 			slog.Info("waiting for next interval", "wait_for", waitFor)
 			time.Sleep(waitFor)
@@ -69,50 +63,45 @@ func main() {
 			// Keep retrying if we're behind schedule.
 			time.Sleep(time.Second)
 		}
-		if l, err := refresh(last); err != nil {
+		if err := refresh(prom); err != nil {
 			slog.Error("failed to refresh", "error", err)
 		} else {
-			last = l
+			lastSuccess = time.Now()
 		}
 	}
 }
 
-func refresh(prev time.Time) (retTime time.Time, retErr error) {
+func refresh(prom *promSyncer) (retErr error) {
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("panic in refresh", "error", r)
-			retTime = prev
 			retErr = fmt.Errorf("panic in refresh: %v", r)
 		}
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	client := promwrite.NewClient(*writeEndpoint)
 
 	latest, all, err := readData(ctx)
 	if err != nil {
-		return prev, fmt.Errorf("reading data: %w", err)
+		return fmt.Errorf("reading data: %w", err)
 	}
 	slog.Info("read data", "num_records", len(all))
 
 	if latest.Battery > -1 {
-		if err := reportMetric(ctx, client, "battery_level_percent", latest.Time, float64(latest.Battery)); err != nil {
-			return prev, fmt.Errorf("reporting battery level: %w", err)
+		if err := prom.reportMetric(ctx, "battery_level_percent", latest.Time, float64(latest.Battery)); err != nil {
+			return fmt.Errorf("reporting battery level: %w", err)
 		}
 	}
 
 	if len(all) == 0 {
 		slog.Warn("no history read", "num_records", len(all))
-		return prev, nil
+		return nil
 	}
 	slices.SortFunc(all, func(a, b aranet4.Data) int {
 		return a.Time.Compare(b.Time)
 	})
-	lastTime := prev
+	var lastReported time.Time
 	for _, data := range all {
-		if !prev.IsZero() && !data.Time.After(prev) {
-			continue
-		}
 		if data.Time.IsZero() {
 			slog.Warn("unexpected time value, skipping", "data", data)
 			continue
@@ -126,17 +115,17 @@ func refresh(prev time.Time) (retTime time.Time, retErr error) {
 			continue
 		}
 		slog.Debug("reporting new record", "data", data)
-		if err := reportData(ctx, client, &data); err != nil {
-			return prev, fmt.Errorf("reporting data: %w", err)
+		if err := reportData(ctx, prom, &data); err != nil {
+			return fmt.Errorf("reporting data: %w", err)
 		}
-		lastTime = data.Time
+		lastReported = data.Time
 	}
-	if !lastTime.IsZero() {
-		if err := reportMetric(ctx, client, "last_success_time_seconds", lastTime, float64(lastTime.Unix())); err != nil {
-			return prev, fmt.Errorf("reporting last success time: %w", err)
+	if !lastReported.IsZero() {
+		if err := prom.reportMetric(ctx, "last_reported_time_seconds", time.Now(), float64(lastReported.Unix())); err != nil {
+			return fmt.Errorf("reporting last success time: %w", err)
 		}
 	}
-	return lastTime, nil
+	return nil
 }
 
 func passkey() int {
@@ -209,9 +198,9 @@ func readData(ctx context.Context) (latest *aranet4.Data, all []aranet4.Data, _ 
 	return &data, allData, nil
 }
 
-func reportData(ctx context.Context, client *promwrite.Client, data *aranet4.Data) error {
+func reportData(ctx context.Context, prom *promSyncer, data *aranet4.Data) error {
 	report := func(name string, value float64) error {
-		return reportMetric(ctx, client, name, data.Time, value)
+		return prom.reportMetric(ctx, name, data.Time, value)
 	}
 	if err := report("co2_ppm", float64(data.CO2)); err != nil {
 		return fmt.Errorf("reporting CO2: %w", err)
@@ -226,60 +215,4 @@ func reportData(ctx context.Context, client *promwrite.Client, data *aranet4.Dat
 		return fmt.Errorf("reporting temperature: %w", err)
 	}
 	return nil
-}
-
-func reportMetric(ctx context.Context, client *promwrite.Client, name string, ts time.Time, value float64) error {
-	// Validate timestamp - must not be zero
-	if ts.IsZero() {
-		return fmt.Errorf("cannot report metric %q with zero timestamp", name)
-	}
-	// Reject timestamps more than 1 hour in the future (likely clock sync issue)
-	// Allow old timestamps for historical data
-	now := time.Now()
-	if ts.After(now.Add(time.Hour)) {
-		return fmt.Errorf("timestamp %v for metric %q is too far in the future (more than 1 hour ahead of now)", ts, name)
-	}
-
-	req := &prompb.WriteRequest{
-		Timeseries: []prompb.TimeSeries{
-			{
-				Labels: labels(name),
-				Samples: []prompb.Sample{
-					{
-						Value:     value,
-						Timestamp: ts.UnixNano() / int64(time.Millisecond),
-					},
-				},
-			},
-		},
-	}
-	_, err := client.WriteProto(ctx, req)
-	if err != nil {
-		return fmt.Errorf("sending request %+v: %w", req, err)
-	}
-	return nil
-}
-
-func labels(metricName string) []prompb.Label {
-	l := make([]prompb.Label, 0, 4)
-	l = append(l, prompb.Label{
-		Name:  "__name__",
-		Value: *metricPrefix + metricName,
-	})
-	l = append(l, prompb.Label{
-		Name:  "job",
-		Value: *jobName,
-	})
-	l = append(l, prompb.Label{
-		Name:  "instance",
-		Value: *instanceName,
-	})
-	l = append(l, prompb.Label{
-		Name:  "device_addr",
-		Value: *deviceAddr,
-	})
-	slices.SortFunc(l, func(a, b prompb.Label) int {
-		return strings.Compare(a.Name, b.Name)
-	})
-	return l
 }

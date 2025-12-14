@@ -4,6 +4,8 @@ go 1.25.4
 
 require (
 	github.com/castai/promwrite v0.6.0
+	github.com/prometheus/client_golang v1.22.0
+	github.com/prometheus/common v0.67.4
 	github.com/prometheus/prometheus v0.304.1
 	github.com/rigado/ble v0.6.17
 	sbinet.org/x/aranet4 v0.11.1
@@ -24,11 +26,11 @@ require (
 	github.com/muka/go-bluetooth v0.0.0-20221213043735-5c782bb62e81 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
-	github.com/prometheus/common v0.63.0 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/wsddn/go-ecdh v0.0.0-20161211032359-48726bab9208 // indirect
+	go.yaml.in/yaml/v2 v2.4.3 // indirect
 	golang.org/x/crypto v0.37.0 // indirect
-	golang.org/x/sys v0.32.0 // indirect
-	golang.org/x/text v0.24.0 // indirect
-	google.golang.org/protobuf v1.36.6 // indirect
+	golang.org/x/sys v0.37.0 // indirect
+	golang.org/x/text v0.30.0 // indirect
+	google.golang.org/protobuf v1.36.10 // indirect
 )
