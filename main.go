@@ -119,13 +119,6 @@ func newCollector(prom *promsync.Syncer) (*collector, error) {
 			Buckets: prometheus.ExponentialBucketsRange(1, 120, 5),
 		}, []string{"status"}),
 	}
-	promauto.NewGaugeFunc(prometheus.GaugeOpts{
-		Name: *metricPrefix + "last_success_time_seconds",
-		Help: "The last time the collector successfully refreshed data.",
-	}, func() float64 {
-		return float64(c.lastSuccess.Load().Unix())
-	})
-
 	http.Handle("/", c)
 	http.Handle("/metrics", promhttp.Handler())
 	go func() {
@@ -135,6 +128,15 @@ func newCollector(prom *promsync.Syncer) (*collector, error) {
 	if err := c.refresh(); err != nil {
 		return nil, fmt.Errorf("failed to refresh: %w", err)
 	}
+
+	// Only report last success time metric if we've successfully refreshed data.
+	promauto.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: *metricPrefix + "last_success_time_seconds",
+		Help: "The last time the collector successfully refreshed data.",
+	}, func() float64 {
+		return float64(c.lastSuccess.Load().Unix())
+	})
+
 	return c, nil
 }
 

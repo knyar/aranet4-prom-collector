@@ -16,6 +16,8 @@ import (
 
 	"github.com/prometheus/client_golang/api"
 	v1 "github.com/prometheus/client_golang/api/prometheus/v1"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 // Config holds configuration for the Prometheus syncer.
@@ -40,6 +42,9 @@ type Syncer struct {
 	write  *promwrite.Client
 	api    api.Client
 	config *Config
+
+	// metricWrites is a counter of metric write attempts.
+	metricWrites *prometheus.CounterVec
 
 	// lastTimes is a map of metric name to the last time it was written.
 	lastTimes map[string]time.Time
@@ -75,6 +80,11 @@ func New(config Config) (*Syncer, error) {
 		api:       client,
 		config:    &config,
 		lastTimes: make(map[string]time.Time),
+
+		metricWrites: promauto.NewCounterVec(prometheus.CounterOpts{
+			Name: config.MetricPrefix + "prometheus_writes_total",
+			Help: "Total number of metric write attempts by status",
+		}, []string{"status"}),
 	}, nil
 }
 
@@ -121,19 +131,23 @@ func (s *Syncer) lastTime(ctx context.Context, metric string) (time.Time, error)
 // ReportMetric writes a metric to Prometheus.
 func (s *Syncer) ReportMetric(ctx context.Context, name string, ts time.Time, value float64) error {
 	if ts.IsZero() {
+		s.metricWrites.WithLabelValues("error").Inc()
 		return fmt.Errorf("cannot report metric %q with zero timestamp", name)
 	}
 	now := time.Now()
 	if ts.After(now.Add(time.Hour)) {
+		s.metricWrites.WithLabelValues("error").Inc()
 		return fmt.Errorf("timestamp %v for metric %q is too far in the future (more than 1 hour ahead of now)", ts, name)
 	}
 
 	last, err := s.lastTime(ctx, name)
 	if err != nil {
+		s.metricWrites.WithLabelValues("error").Inc()
 		return fmt.Errorf("getting last time for metric %q: %w", name, err)
 	}
 	if !ts.After(last) {
 		slog.Debug("skipping value with timestamp before last reported", "metric", name, "ts", ts, "last", last)
+		s.metricWrites.WithLabelValues("skipped").Inc()
 		return nil
 	}
 
@@ -152,11 +166,14 @@ func (s *Syncer) ReportMetric(ctx context.Context, name string, ts time.Time, va
 	}
 	if s.config.DryRun {
 		slog.Info("dry run, skipping write", "request", req)
+		s.metricWrites.WithLabelValues("skipped").Inc()
 	} else {
 		if _, err := s.write.WriteProto(ctx, req); err != nil {
+			s.metricWrites.WithLabelValues("error").Inc()
 			return fmt.Errorf("sending request %+v: %w", req, err)
 		}
 	}
+	s.metricWrites.WithLabelValues("success").Inc()
 	s.lastTimes[name] = ts
 	return nil
 }
