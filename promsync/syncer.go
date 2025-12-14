@@ -1,4 +1,4 @@
-package main
+package promsync
 
 import (
 	"context"
@@ -18,50 +18,75 @@ import (
 	v1 "github.com/prometheus/client_golang/api/prometheus/v1"
 )
 
-type promSyncer struct {
+// Config holds configuration for the Prometheus syncer.
+type Config struct {
+	// PrometheusEndpoint is the base URL of the Prometheus instance (e.g., "http://localhost:9090/")
+	PrometheusEndpoint string
+
+	// MetricPrefix is the prefix to use for all metric names (e.g., "aranet4_")
+	MetricPrefix string
+
+	// Labels are additional labels to add to all metrics.
+	// Common labels include "job", "instance", etc.
+	Labels map[string]string
+
+	// DryRun, if true, will log metrics instead of writing them to Prometheus.
+	DryRun bool
+}
+
+// Syncer writes metrics to Prometheus using Remote Write API, attempting to avoid
+// writing duplicate data by keeping track of the last reported time for each metric.
+type Syncer struct {
 	write  *promwrite.Client
 	api    api.Client
-	dryRun bool
+	config *Config
 
 	// lastTimes is a map of metric name to the last time it was written.
 	lastTimes map[string]time.Time
 }
 
-func newPromSyncer(endpoint string, dryRun bool) (*promSyncer, error) {
-	url, err := url.Parse(endpoint)
+// New creates a new Prometheus syncer with the given configuration.
+func New(config Config) (*Syncer, error) {
+	if config.PrometheusEndpoint == "" {
+		return nil, fmt.Errorf("PrometheusEndpoint is required")
+	}
+
+	url, err := url.Parse(config.PrometheusEndpoint)
 	if err != nil {
-		return nil, fmt.Errorf("failed to URL %q: %w", endpoint, err)
+		return nil, fmt.Errorf("failed to parse URL %q: %w", config.PrometheusEndpoint, err)
 	}
 	if url.Host == "" {
-		return nil, fmt.Errorf("URL %q has no host", endpoint)
+		return nil, fmt.Errorf("URL %q has no host", config.PrometheusEndpoint)
 	}
 	if url.Scheme == "" {
-		return nil, fmt.Errorf("URL %q has no scheme", endpoint)
+		return nil, fmt.Errorf("URL %q has no scheme", config.PrometheusEndpoint)
 	}
-	client, err := api.NewClient(api.Config{
-		Address: url.String(),
-	})
+
+	client, err := api.NewClient(api.Config{Address: url.String()})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Prometheus client: %w", err)
 	}
 
 	writeURL := url.JoinPath("/api/v1/write")
-	slog.Debug("Prometheus syncer created", "write-url", writeURL.String())
-	return &promSyncer{
+	slog.Debug("Prometheus syncer created", "write-url", writeURL.String(), "prefix", config.MetricPrefix, "labels", config.Labels)
+
+	return &Syncer{
 		write:     promwrite.NewClient(writeURL.String()),
 		api:       client,
-		dryRun:    dryRun,
+		config:    &config,
 		lastTimes: make(map[string]time.Time),
 	}, nil
 }
 
-func (s *promSyncer) lastTime(ctx context.Context, metric string) (time.Time, error) {
+// lastTime returns the last time a metric was reported.
+func (s *Syncer) lastTime(ctx context.Context, metric string) (time.Time, error) {
 	last, ok := s.lastTimes[metric]
 	if ok {
 		return last, nil
 	}
+
 	api := v1.NewAPI(s.api)
-	query := fmt.Sprintf("timestamp(%s)", labelSet(metric).String())
+	query := fmt.Sprintf("timestamp(%s)", s.labelSet(metric).String())
 	// aranet4 stores data locally for up to 30 days.
 	// https://forum.aranet.com/aranet-home-devices-aranet4-aranet2-aranet-radiation-aranet-radon/how-long-does-the-aranet4-device-store-historic-data/
 	v, warn, err := api.Query(ctx, query, time.Now(), v1.WithLookbackDelta(30*24*time.Hour))
@@ -93,7 +118,8 @@ func (s *promSyncer) lastTime(ctx context.Context, metric string) (time.Time, er
 	return last, nil
 }
 
-func (s *promSyncer) reportMetric(ctx context.Context, name string, ts time.Time, value float64) error {
+// ReportMetric writes a metric to Prometheus.
+func (s *Syncer) ReportMetric(ctx context.Context, name string, ts time.Time, value float64) error {
 	if ts.IsZero() {
 		return fmt.Errorf("cannot report metric %q with zero timestamp", name)
 	}
@@ -101,6 +127,7 @@ func (s *promSyncer) reportMetric(ctx context.Context, name string, ts time.Time
 	if ts.After(now.Add(time.Hour)) {
 		return fmt.Errorf("timestamp %v for metric %q is too far in the future (more than 1 hour ahead of now)", ts, name)
 	}
+
 	last, err := s.lastTime(ctx, name)
 	if err != nil {
 		return fmt.Errorf("getting last time for metric %q: %w", name, err)
@@ -113,7 +140,7 @@ func (s *promSyncer) reportMetric(ctx context.Context, name string, ts time.Time
 	req := &prompb.WriteRequest{
 		Timeseries: []prompb.TimeSeries{
 			{
-				Labels: labelsProto(name),
+				Labels: s.labelsProto(name),
 				Samples: []prompb.Sample{
 					{
 						Value:     value,
@@ -123,7 +150,7 @@ func (s *promSyncer) reportMetric(ctx context.Context, name string, ts time.Time
 			},
 		},
 	}
-	if s.dryRun {
+	if s.config.DryRun {
 		slog.Info("dry run, skipping write", "request", req)
 	} else {
 		if _, err := s.write.WriteProto(ctx, req); err != nil {
@@ -134,20 +161,22 @@ func (s *promSyncer) reportMetric(ctx context.Context, name string, ts time.Time
 	return nil
 }
 
-func labelSet(metricName string) labels.Labels {
+// labelSet returns the full label set for a metric.
+func (s *Syncer) labelSet(metricName string) labels.Labels {
 	ll := labels.Labels{
-		{Name: "__name__", Value: *metricPrefix + metricName},
-		{Name: "job", Value: *jobName},
-		{Name: "instance", Value: *instanceName},
-		{Name: "device_addr", Value: *deviceAddr},
+		{Name: "__name__", Value: s.config.MetricPrefix + metricName},
 	}
+	// Add additional labels, and sort by name.
+	for name, value := range s.config.Labels {
+		ll = append(ll, labels.Label{Name: name, Value: value})
+	}
+	slices.SortFunc(ll, func(a, b labels.Label) int {
+		return strings.Compare(a.Name, b.Name)
+	})
 	return ll
 }
 
-func labelsProto(metricName string) []prompb.Label {
-	l := prompb.FromLabels(labelSet(metricName), nil)
-	slices.SortFunc(l, func(a, b prompb.Label) int {
-		return strings.Compare(a.Name, b.Name)
-	})
-	return l
+// labelsProto returns the full label set for a metric as a protobuf.
+func (s *Syncer) labelsProto(metricName string) []prompb.Label {
+	return prompb.FromLabels(s.labelSet(metricName), nil)
 }

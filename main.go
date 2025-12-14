@@ -14,6 +14,8 @@ import (
 	"github.com/rigado/ble"
 	"github.com/rigado/ble/linux"
 	bonds "github.com/rigado/ble/linux/hci/bond"
+
+	"github.com/knyar/aranet4-prom-collector/promsync"
 )
 
 var (
@@ -40,7 +42,16 @@ func main() {
 		slog.SetLogLoggerLevel(slog.LevelDebug)
 	}
 
-	prom, err := newPromSyncer(*promEndpoint, *dryRun)
+	prom, err := promsync.New(promsync.Config{
+		PrometheusEndpoint: *promEndpoint,
+		MetricPrefix:       *metricPrefix,
+		Labels: map[string]string{
+			"job":         *jobName,
+			"instance":    *instanceName,
+			"device_addr": *deviceAddr,
+		},
+		DryRun: *dryRun,
+	})
 	if err != nil {
 		slog.Error("failed to create Prometheus syncer", "error", err)
 		os.Exit(1)
@@ -71,7 +82,7 @@ func main() {
 	}
 }
 
-func refresh(prom *promSyncer) (retErr error) {
+func refresh(prom *promsync.Syncer) (retErr error) {
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("panic in refresh", "error", r)
@@ -88,7 +99,7 @@ func refresh(prom *promSyncer) (retErr error) {
 	slog.Info("read data", "num_records", len(all))
 
 	if latest.Battery > -1 {
-		if err := prom.reportMetric(ctx, "battery_level_percent", latest.Time, float64(latest.Battery)); err != nil {
+		if err := prom.ReportMetric(ctx, "battery_level_percent", latest.Time, float64(latest.Battery)); err != nil {
 			return fmt.Errorf("reporting battery level: %w", err)
 		}
 	}
@@ -121,7 +132,7 @@ func refresh(prom *promSyncer) (retErr error) {
 		lastReported = data.Time
 	}
 	if !lastReported.IsZero() {
-		if err := prom.reportMetric(ctx, "last_reported_time_seconds", time.Now(), float64(lastReported.Unix())); err != nil {
+		if err := prom.ReportMetric(ctx, "last_reported_time_seconds", time.Now(), float64(lastReported.Unix())); err != nil {
 			return fmt.Errorf("reporting last success time: %w", err)
 		}
 	}
@@ -198,9 +209,9 @@ func readData(ctx context.Context) (latest *aranet4.Data, all []aranet4.Data, _ 
 	return &data, allData, nil
 }
 
-func reportData(ctx context.Context, prom *promSyncer, data *aranet4.Data) error {
+func reportData(ctx context.Context, prom *promsync.Syncer, data *aranet4.Data) error {
 	report := func(name string, value float64) error {
-		return prom.reportMetric(ctx, name, data.Time, value)
+		return prom.ReportMetric(ctx, name, data.Time, value)
 	}
 	if err := report("co2_ppm", float64(data.CO2)); err != nil {
 		return fmt.Errorf("reporting CO2: %w", err)
