@@ -10,10 +10,10 @@ import (
 	"slices"
 	"time"
 
+	"github.com/knyar/aranet4-ble"
 	"github.com/rigado/ble"
 	"github.com/rigado/ble/linux"
 	bonds "github.com/rigado/ble/linux/hci/bond"
-	"sbinet.org/x/aranet4"
 )
 
 var (
@@ -22,11 +22,11 @@ var (
 	verbose = flag.Bool("verbose", false, "Verbose logging")
 	dryRun  = flag.Bool("dry-run", false, "Dry run mode")
 
-	hciSkt     = flag.Int("device", -1, "hci index")
-	btBondFile = flag.String("bt-bonds-file", "bonds.json", "Bluetooth bond state file")
-	deviceAddr = flag.String("addr", "F5:6C:BE:D5:61:47", "MAC address of Aranet4")
+	hciSocketID = flag.Int("hci-socket-id", -1, "hci device socket ID")
+	deviceAddr  = flag.String("addr", "F5:6C:BE:D5:61:47", "MAC address of Aranet4")
+	btBondFile  = flag.String("bt-bonds-file", "bonds.json", "Bluetooth bond state file: written when pairing is successful")
 
-	interval     = flag.Duration("interval", time.Hour, "How often to read data from Aranet4")
+	interval     = flag.Duration("interval", time.Hour, "How often to sync data from Aranet4 to Prometheus")
 	metricPrefix = flag.String("prefix", "aranet4_", "Prefix for metrics")
 	promEndpoint = flag.String("prometheus-url", "http://localhost:9090/", "Prometheus base URL")
 	jobName      = flag.String("job", "aranet4", "Job name for metrics")
@@ -148,7 +148,7 @@ func readData(ctx context.Context) (latest *aranet4.Data, all []aranet4.Data, _ 
 
 	d, err := linux.NewDevice(
 		ble.OptEnableSecurity(bm),
-		ble.OptTransportHCISocket(*hciSkt),
+		ble.OptTransportHCISocket(*hciSocketID),
 		ble.OptDialerTimeout(10*time.Second),
 	)
 	if err != nil {
@@ -158,7 +158,7 @@ func readData(ctx context.Context) (latest *aranet4.Data, all []aranet4.Data, _ 
 	defer d.Stop()
 
 	slog.Debug("connecting to device", "device-addr", *deviceAddr)
-	device, err := aranet4.New(ctx, *deviceAddr, aranet4.WithPasskey(passkey))
+	device, err := aranet4.New(ctx, *deviceAddr)
 	if err != nil {
 		return nil, nil, fmt.Errorf("connecting to device: %w", err)
 	}
@@ -171,7 +171,7 @@ func readData(ctx context.Context) (latest *aranet4.Data, all []aranet4.Data, _ 
 	slices.Reverse(addr)
 	for !bm.Exists(hex.EncodeToString(addr)) {
 		slog.Warn("no bond found, pairing")
-		if err := device.Client().Pair(ble.AuthData{}, 2*time.Minute); err != nil {
+		if err := device.Client().Pair(ble.AuthData{PasskeyFn: passkey}, 2*time.Minute); err != nil {
 			return nil, nil, fmt.Errorf("pairing: %w", err)
 		}
 	}
