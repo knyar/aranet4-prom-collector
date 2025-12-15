@@ -51,3 +51,17 @@ over Tailscale once a day, use the following [gokrazy](https://gokrazy.org/) con
 }
 ```
 
+## Known issues
+
+### unknown field PasskeyFn
+
+When compiling for Gokrazy, you might hit an error:
+
+> /Users/ryzh/code/gopath/pkg/mod/github.com/knyar/aranet4-prom-collector@v0.0.0-20251214185135-b8693e239b5b/main.go:262:28: unknown field PasskeyFn in struct literal of type ble.AuthData
+
+For now, a patched `ble` library is used, so you need to add a `replace` statement to `go.mod`:
+
+```bash
+cd builddir/github.com/knyar/aranet4-prom-collector/
+go mod edit -replace github.com/rigado/ble=github.com/knyar/ble@getPasskey
+```
