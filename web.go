@@ -17,44 +17,42 @@ func (c *collector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Handle POST request for passkey
 	if r.Method == http.MethodPost {
-		c.handlePasskeyPost(w, r)
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "Bad Request: failed to parse form", http.StatusBadRequest)
+			return
+		}
+
+		action := r.FormValue("action")
+		switch action {
+		case "refresh":
+			c.handleRefreshPost(w, r)
+		case "passkey":
+			c.handlePasskeyPost(w, r)
+		default:
+			http.Error(w, "Bad Request: unknown action", http.StatusBadRequest)
+		}
 		return
 	}
 
-	// Handle GET request for status page
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	lastSuccess := c.lastSuccess.Load()
 	lastReported := c.lastReported.Load()
-	now := time.Now()
-
-	// Calculate time ago strings
-	var lastSuccessAgo, lastReportedAgo string
-	if !lastSuccess.IsZero() {
-		lastSuccessAgo = formatDuration(now.Sub(lastSuccess))
-	}
+	var lastReportedAgo string
 	if !lastReported.IsZero() {
-		lastReportedAgo = formatDuration(now.Sub(lastReported))
+		lastReportedAgo = formatDuration(time.Since(lastReported))
 	}
 
 	data := struct {
-		LastSuccess     time.Time
-		LastSuccessAgo  string
 		LastReported    time.Time
 		LastReportedAgo string
-		CurrentTime     time.Time
 		WantPasskey     bool
 	}{
-		LastSuccess:     lastSuccess,
-		LastSuccessAgo:  lastSuccessAgo,
 		LastReported:    lastReported,
 		LastReportedAgo: lastReportedAgo,
-		CurrentTime:     now,
 		WantPasskey:     c.passkeyChan.Load() != nil,
 	}
 
@@ -65,13 +63,18 @@ func (c *collector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleRefreshPost handles POST requests to trigger a refresh.
+func (c *collector) handleRefreshPost(w http.ResponseWriter, r *http.Request) {
+	select {
+	case c.refreshChan <- true:
+		slog.Info("refresh triggered via web interface")
+	default:
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
 // handlePasskeyPost handles POST requests with passkey data.
 func (c *collector) handlePasskeyPost(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "Bad Request: failed to parse form", http.StatusBadRequest)
-		return
-	}
-
 	passkeyStr := r.FormValue("passkey")
 	if passkeyStr == "" {
 		http.Error(w, "Bad Request: passkey is required", http.StatusBadRequest)

@@ -104,10 +104,14 @@ type collector struct {
 	// lastReported is the timestamp of the last reported measurement.
 	lastReported syncs.AtomicValue[time.Time]
 
-	// attempts is a histogram of refresh attempts.
+	// attempts is a histogram of refresh latencies.
 	attempts *prometheus.HistogramVec
 
+	// passkeyChan is a channel for passing the passkey to the collector.
 	passkeyChan syncs.AtomicValue[chan int]
+
+	// refreshChan is a channel for requesting a refresh.
+	refreshChan chan bool
 }
 
 func newCollector(prom *promsync.Syncer) (*collector, error) {
@@ -124,6 +128,7 @@ func newCollector(prom *promsync.Syncer) (*collector, error) {
 			Help:    "Latencies of refresh attempts.",
 			Buckets: prometheus.ExponentialBucketsRange(1, 120, 5),
 		}, []string{"status"}),
+		refreshChan: make(chan bool),
 	}
 	http.Handle("/", c)
 	http.Handle("/metrics", promhttp.Handler())
@@ -151,11 +156,17 @@ func (c *collector) loop() {
 		waitFor := time.Until(c.lastSuccess.Load().Add(*interval))
 		if waitFor > 0 {
 			slog.Info("waiting for next interval", "wait_for", waitFor)
-			time.Sleep(waitFor)
 		} else {
-			// Keep retrying if we're behind schedule.
-			time.Sleep(time.Second)
+			// Keep retrying aggressively if we're behind schedule.
+			waitFor = time.Second
 		}
+
+		// Wait for timer, or for a refresh request.
+		select {
+		case <-time.After(waitFor):
+		case <-c.refreshChan:
+		}
+
 		if err := c.refresh(); err != nil {
 			slog.Error("failed to refresh", "error", err)
 		}
