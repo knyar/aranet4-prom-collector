@@ -14,9 +14,25 @@ go build .
 Please make sure your Prometheus server is configured to accept metrics through Remote Write API ([--web.enable-remote-write-receiver](https://prometheus.io/docs/prometheus/latest/querying/api/#remote-write-receiver)) and enable support for [out-of-order samples](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#tsdb) (set `out_of_order_time_window` to `30d`).
 
 During the first run the collector will attempt to pair with Aranet4 over Bluetooth.
-For pairing, you will need to enter the 6-digit keypass either in terminal (if TTY is available), or on a web page (port 9090 by default).
+For pairing, you will need to enter the 6-digit keypass either in terminal (if TTY is available), or on a web page (port 8000 by default).
 Pairing details will be saved to the `bonds.json` file in current directory (use `-bt-bonds-file=` to
 override).
+
+## Reported metrics
+
+The following metrics are reported to Prometheus server using Remote Write:
+
+- aranet4_co2_ppm
+- aranet4_humidity_percent
+- aranet4_pressure_hpa
+- aranet4_temperature_celsius
+
+The collector also exposes live metrics through a standard `/metrics` endpoint on the web server (default port is 8000):
+
+- aranet4_battery_level_percent
+- aranet4_last_success_time_seconds
+- aranet4_prometheus_writes_total
+- aranet4_refresh_latencies_seconds (histogram)
 
 ## Running in gokrazy
 
@@ -36,6 +52,7 @@ over Tailscale once a day, use the following [gokrazy](https://gokrazy.org/) con
     "PackageConfig": {
         "github.com/knyar/aranet4-prom-collector": {
             "CommandLineFlags": [
+                "-listen=:8000",
                 "-interval=24h",
                 "-bt-bonds-file=/perm/aranet4-bt.json",
                 "-prometheus-url=http://prometheus:9090",

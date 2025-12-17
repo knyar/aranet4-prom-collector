@@ -33,12 +33,12 @@ var (
 
 	verbose  = flag.Bool("verbose", false, "Verbose logging")
 	dryRun   = flag.Bool("dry-run", false, "Dry run mode")
-	listen   = flag.String("listen", ":9090", "Listen address for HTTP server")
+	listen   = flag.String("listen", "localhost:8000", "Listen address for HTTP server")
 	interval = flag.Duration("interval", time.Hour, "How often to sync data from Aranet4 to Prometheus")
 	timeout  = flag.Duration("timeout", 5*time.Minute, "Timeout for a single refresh operations")
 
 	hciSocketID = flag.Int("hci-socket-id", -1, "hci device socket ID")
-	deviceAddr  = flag.String("addr", "F5:6C:BE:D5:61:47", "MAC address of Aranet4")
+	deviceAddr  = flag.String("addr", "", "MAC address of Aranet4")
 	btBondFile  = flag.String("bt-bonds-file", "bonds.json", "Bluetooth bond state file: written when pairing is successful")
 	passkeyMode = flag.String("passkey-mode", "auto", "Determines how passkey is requested at pairint time (auto, web, terminal")
 
@@ -53,6 +53,10 @@ func main() {
 
 	if *verbose {
 		slog.SetLogLoggerLevel(slog.LevelDebug)
+	}
+	if *deviceAddr == "" {
+		slog.Error("device address is required", "device-addr", *deviceAddr)
+		os.Exit(1)
 	}
 	if *interval <= 0 {
 		slog.Error("interval must be greater than 0", "interval", *interval)
@@ -114,6 +118,7 @@ type collector struct {
 	refreshChan chan bool
 }
 
+// newCollector creates a new collector and attemots a first sync.
 func newCollector(prom *promsync.Syncer) (*collector, error) {
 	tmpl, err := template.ParseFS(staticFiles, "index.html")
 	if err != nil {
@@ -133,9 +138,11 @@ func newCollector(prom *promsync.Syncer) (*collector, error) {
 	http.Handle("/", c)
 	http.Handle("/metrics", promhttp.Handler())
 	go func() {
-		http.ListenAndServe(*listen, nil)
+		slog.Error("http.ListenAndServe", "error", http.ListenAndServe(*listen, nil))
+		os.Exit(1)
 	}()
 
+	// Refresh once immediately to get the initial data.
 	if err := c.refresh(); err != nil {
 		return nil, fmt.Errorf("failed to refresh: %w", err)
 	}
@@ -151,13 +158,14 @@ func newCollector(prom *promsync.Syncer) (*collector, error) {
 	return c, nil
 }
 
+// loop regularly refreshes data.
 func (c *collector) loop() {
 	for {
 		waitFor := time.Until(c.lastSuccess.Load().Add(*interval))
 		if waitFor > 0 {
 			slog.Info("waiting for next interval", "wait_for", waitFor)
 		} else {
-			// Keep retrying aggressively if we're behind schedule.
+			// Keep retrying more aggressively if we're behind schedule.
 			waitFor = time.Second
 		}
 
@@ -173,16 +181,20 @@ func (c *collector) loop() {
 	}
 }
 
+// refresh runs a single attempt to pull data from Aranet and report it to Prometheus.
 func (c *collector) refresh() (retErr error) {
 	t0 := time.Now()
 
-	t := time.AfterFunc(*timeout*2, func() {
+	// There's no way to pass a real timeout to the ble library, so we just end
+	// the process if the sync takes too long and expect gokrazy or systemd to
+	// restart the collector.
+	watchdog := time.AfterFunc(*timeout*2, func() {
 		slog.Error("refresh took too long; exiting", "timeout", *timeout, "duration", time.Since(t0))
 		os.Exit(1)
 	})
 
 	defer func() {
-		t.Stop()
+		watchdog.Stop()
 		if r := recover(); r != nil {
 			slog.Error("panic in refresh", "error", r)
 			retErr = fmt.Errorf("panic in refresh: %v", r)
@@ -196,11 +208,13 @@ func (c *collector) refresh() (retErr error) {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
+	// We only use the latest data for reporting battery level,
+	// since it's not stored in the historic data.
 	latest, all, err := c.readData(ctx)
 	if err != nil {
 		return fmt.Errorf("reading data: %w", err)
 	}
-	slog.Info("read data", "num_records", len(all))
+	slog.Info("Read data from Aranet4", "battery_level", latest.Battery, "num_historic_records", len(all))
 
 	if latest.Battery > -1 {
 		if err := c.prom.ReportMetric(ctx, "battery_level_percent", latest.Time, float64(latest.Battery)); err != nil {
@@ -209,8 +223,7 @@ func (c *collector) refresh() (retErr error) {
 	}
 
 	if len(all) == 0 {
-		slog.Warn("no history read", "num_records", len(all))
-		return nil
+		return fmt.Errorf("no historic records returned")
 	}
 	slices.SortFunc(all, func(a, b aranet4.Data) int {
 		return a.Time.Compare(b.Time)
@@ -230,8 +243,8 @@ func (c *collector) refresh() (retErr error) {
 			continue
 		}
 		slog.Debug("reporting new record", "data", data)
-		if err := c.reportData(ctx, &data); err != nil {
-			return fmt.Errorf("reporting data: %w", err)
+		if err := c.reportMetrics(ctx, &data); err != nil {
+			return fmt.Errorf("reporting data %v: %w", data, err)
 		}
 		lastReported = data.Time
 	}
@@ -242,6 +255,7 @@ func (c *collector) refresh() (retErr error) {
 	return nil
 }
 
+// readData reads the latest data and all historic data from Aranet4.
 func (c *collector) readData(ctx context.Context) (latest *aranet4.Data, all []aranet4.Data, _ error) {
 	bm := bonds.NewBondManager(*btBondFile)
 
@@ -263,10 +277,8 @@ func (c *collector) readData(ctx context.Context) (latest *aranet4.Data, all []a
 	}
 	defer device.Close()
 
-	// Start encryption.
 	addr := device.Client().Addr().Bytes()
-	// Reverse the address bytes (Bluetooth addresses are stored in little-endian,
-	// but the bond manager expects big-endian format)
+	// Bond manager expects address in big-endian?
 	slices.Reverse(addr)
 	for !bm.Exists(hex.EncodeToString(addr)) {
 		slog.Warn("no bond found, pairing")
@@ -298,7 +310,8 @@ func (c *collector) readData(ctx context.Context) (latest *aranet4.Data, all []a
 	return &data, allData, nil
 }
 
-func (c *collector) reportData(ctx context.Context, data *aranet4.Data) error {
+// reportMetrics reports the metrics for a single data point to Prometheus.
+func (c *collector) reportMetrics(ctx context.Context, data *aranet4.Data) error {
 	report := func(name string, value float64) error {
 		return c.prom.ReportMetric(ctx, name, data.Time, value)
 	}

@@ -73,7 +73,7 @@ func (c *collector) handleRefreshPost(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
-// handlePasskeyPost handles POST requests with passkey data.
+// handlePasskeyPost handles POST requests with passkey data for pairing.
 func (c *collector) handlePasskeyPost(w http.ResponseWriter, r *http.Request) {
 	passkeyStr := r.FormValue("passkey")
 	if passkeyStr == "" {
