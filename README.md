@@ -34,6 +34,12 @@ The collector also exposes live metrics through a standard `/metrics` endpoint o
 - aranet4_prometheus_writes_total
 - aranet4_refresh_latencies_seconds (histogram)
 
+## Example dashboard
+
+Here's an [example dashboard](https://github.com/knyar/aranet4-prom-collector/tree/main/aranet4-dashboard.json) showing the metrics in Grafana.
+
+<img width="1486" height="740" alt="screenshot" src="https://github.com/user-attachments/assets/e0c38427-41e5-4d3b-b3d2-ef719b221d2b" />
+
 ## Running in gokrazy
 
 To run the collector on a Raspberry Pi and sync metrics to a Prometheus server
