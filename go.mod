@@ -41,4 +41,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/rigado/ble => github.com/knyar/ble v0.0.0-20251214085458-e72e98d47fbe
+replace github.com/rigado/ble => github.com/knyar/ble v0.0.0-20260717173828-f14754569310

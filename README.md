@@ -86,5 +86,5 @@ For now, a patched `ble` library is used, so you need to add a `replace` stateme
 
 ```bash
 cd builddir/github.com/knyar/aranet4-prom-collector/
-go mod edit -replace github.com/rigado/ble=github.com/knyar/ble@getPasskey
+go mod edit -replace github.com/rigado/ble=github.com/knyar/ble@master
 ```

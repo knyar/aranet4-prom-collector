@@ -37,8 +37,8 @@ github.com/klauspost/compress v1.18.0 h1:c/Cqfb0r+Yi+JtIEq73FWXVkRonBlf0CRNYc8Zt
 github.com/klauspost/compress v1.18.0/go.mod h1:2Pp+KzxcywXVXMr50+X0Q/Lsb43OQHYWRCY2AiWywWQ=
 github.com/knyar/aranet4-ble v0.0.0-20251214095731-3f83aad3b16a h1:WE6lhxoOYKjqHXoAvNiOwnlZ5SJzssRlkBgEwqS7Ads=
 github.com/knyar/aranet4-ble v0.0.0-20251214095731-3f83aad3b16a/go.mod h1:cE7sYna40fBlq4OdLPoSw1XbB7ChWMlzGidg+cu4Rvw=
-github.com/knyar/ble v0.0.0-20251214085458-e72e98d47fbe h1:8LJR7CHBa1u0sWZdHBcuxldCGFlrp08dB1dRHSJWSys=
-github.com/knyar/ble v0.0.0-20251214085458-e72e98d47fbe/go.mod h1:3dxxAS95dGkQ29/+i7OAIzjBduTuROP6+OqyCBD6zG0=
+github.com/knyar/ble v0.0.0-20260717173828-f14754569310 h1:vKw5/2HEK7BmjBdmwvdP0JUEiKSIG3+OjaZHsLwmtz4=
+github.com/knyar/ble v0.0.0-20260717173828-f14754569310/go.mod h1:3dxxAS95dGkQ29/+i7OAIzjBduTuROP6+OqyCBD6zG0=
 github.com/kr/pretty v0.3.1 h1:flRD4NNwYAUpkphVc1HcthR4KEIFJ65n8Mw5qdRn3LE=
 github.com/kr/pretty v0.3.1/go.mod h1:hoEshYVHaxMs3cyo3Yncou5ZscifuDolrwPKZanG3xk=
 github.com/kr/text v0.2.0 h1:5Nx0Ya0ZqY2ygV366QzturHI13Jq95ApcVaJBhpS+AY=
