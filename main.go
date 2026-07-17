@@ -1,17 +1,20 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/hex"
 	"flag"
 	"fmt"
 	"html/template"
+	"io"
 	"log"
 	"log/slog"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -277,21 +280,31 @@ func (c *collector) readData(ctx context.Context) (latest *aranet4.Data, all []a
 	}
 	defer device.Close()
 
+	// Addr().Bytes() decodes a fresh slice, so reversing it in place is safe.
 	addr := device.Client().Addr().Bytes()
-	// Bond manager expects address in big-endian?
+	// The bond manager keys bonds by the little-endian hex form of the address.
 	slices.Reverse(addr)
-	for !bm.Exists(hex.EncodeToString(addr)) {
+	bondKey := hex.EncodeToString(addr)
+	if !bm.Exists(bondKey) {
 		slog.Warn("no bond found, pairing")
-		authData := ble.AuthData{PasskeyFn: func() int { return c.passkey(ctx) }}
+		authData := ble.AuthData{PasskeyFn: func() (int, error) { return c.passkey(ctx) }}
 		if err := device.Client().Pair(authData, 2*time.Minute); err != nil {
 			return nil, nil, fmt.Errorf("pairing: %w", err)
+		}
+		// Pair returning success means the bond was saved; if it is not
+		// visible under the expected key, re-pairing would not help.
+		if !bm.Exists(bondKey) {
+			return nil, nil, fmt.Errorf("pairing succeeded, but no bond was stored for %s", bondKey)
 		}
 	}
 
 	slog.Debug("starting encryption")
-	m := make(chan ble.EncryptionChangedInfo)
-	if err := device.Client().StartEncryption(m); err != nil {
+	encCh := make(chan ble.EncryptionChangedInfo, 1)
+	if err := device.Client().StartEncryption(encCh); err != nil {
 		return nil, nil, fmt.Errorf("starting encryption: %w", err)
+	}
+	if err := waitForEncryption(ctx, encCh); err != nil {
+		return nil, nil, fmt.Errorf("establishing encryption: %w", err)
 	}
 
 	slog.Debug("reading latest data")
@@ -330,8 +343,27 @@ func (c *collector) reportMetrics(ctx context.Context, data *aranet4.Data) error
 	return nil
 }
 
+// waitForEncryption waits for the result of a StartEncryption call.
+// StartEncryption only issues the HCI command; encryption is established
+// (or fails) asynchronously, and protected characteristics can only be
+// read after a successful encryption change event.
+func waitForEncryption(ctx context.Context, ch <-chan ble.EncryptionChangedInfo) error {
+	select {
+	case info := <-ch:
+		if info.Err != nil {
+			return fmt.Errorf("encryption failed (status %d): %w", info.Status, info.Err)
+		}
+		if !info.Enabled {
+			return fmt.Errorf("encryption not enabled (status %d)", info.Status)
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // passkey prompts the user for a passkey.
-func (c *collector) passkey(ctx context.Context) int {
+func (c *collector) passkey(ctx context.Context) (int, error) {
 	m := *passkeyMode
 	if m == "terminal" || (m == "auto" && isatty.IsTerminal(os.Stdin.Fd())) {
 		return c.passkeyFromTerminal(ctx)
@@ -340,7 +372,7 @@ func (c *collector) passkey(ctx context.Context) int {
 }
 
 // passkeyFromWeb prompts the user for a passkey via a web page.
-func (c *collector) passkeyFromWeb(ctx context.Context) int {
+func (c *collector) passkeyFromWeb(ctx context.Context) (int, error) {
 	pk := make(chan int)
 	c.passkeyChan.Store(pk)
 	defer c.passkeyChan.Store(nil)
@@ -349,24 +381,35 @@ func (c *collector) passkeyFromWeb(ctx context.Context) int {
 	log.Printf("Please enter passkey at http://%s:%s/", hostname, addrport[len(addrport)-1])
 	select {
 	case <-ctx.Done():
-		return 0
+		return 0, fmt.Errorf("waiting for passkey: %w", ctx.Err())
 	case k, ok := <-pk:
 		if !ok {
-			slog.Error("passkey channel closed")
-			return 0
+			return 0, fmt.Errorf("passkey channel closed")
 		}
-		return k
+		return k, nil
 	}
 }
 
 // passkeyFromTerminal prompts the user for a passkey from the terminal.
-func (c *collector) passkeyFromTerminal(ctx context.Context) int {
-	fmt.Print("Enter passkey: ")
-	var p int
-	n, err := fmt.Scanf("%d", &p)
-	if err != nil || n != 1 {
-		fmt.Printf("ERROR: expected 1 integer; got %d values (%v)\n", n, err)
-		return c.passkeyFromTerminal(ctx)
+func (c *collector) passkeyFromTerminal(ctx context.Context) (int, error) {
+	in := bufio.NewScanner(os.Stdin)
+	for {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		fmt.Print("Enter passkey: ")
+		if !in.Scan() {
+			err := in.Err()
+			if err == nil {
+				err = io.EOF
+			}
+			return 0, fmt.Errorf("reading passkey: %w", err)
+		}
+		p, err := strconv.Atoi(strings.TrimSpace(in.Text()))
+		if err != nil {
+			fmt.Printf("ERROR: expected an integer passkey (%v)\n", err)
+			continue
+		}
+		return p, nil
 	}
-	return p
 }
