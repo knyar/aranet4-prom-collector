@@ -34,6 +34,10 @@ type Config struct {
 
 	// DryRun, if true, will log metrics instead of writing them to Prometheus.
 	DryRun bool
+
+	// Registerer is where the syncer's own metrics are registered.
+	// Defaults to prometheus.DefaultRegisterer.
+	Registerer prometheus.Registerer
 }
 
 // Syncer writes metrics to Prometheus using Remote Write API, attempting to avoid
@@ -75,13 +79,18 @@ func New(config Config) (*Syncer, error) {
 	writeURL := url.JoinPath("/api/v1/write")
 	slog.Debug("Prometheus syncer created", "write-url", writeURL.String(), "prefix", config.MetricPrefix, "labels", config.Labels)
 
+	reg := config.Registerer
+	if reg == nil {
+		reg = prometheus.DefaultRegisterer
+	}
+
 	return &Syncer{
 		write:     promwrite.NewClient(writeURL.String()),
 		api:       client,
 		config:    &config,
 		lastTimes: make(map[string]time.Time),
 
-		metricWrites: promauto.NewCounterVec(prometheus.CounterOpts{
+		metricWrites: promauto.With(reg).NewCounterVec(prometheus.CounterOpts{
 			Name: config.MetricPrefix + "prometheus_writes_total",
 			Help: "Total number of metric write attempts by status",
 		}, []string{"status"}),

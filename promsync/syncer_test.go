@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/castai/promwrite"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -27,6 +28,7 @@ func TestNew(t *testing.T) {
 				PrometheusEndpoint: "http://localhost:9090",
 				MetricPrefix:       "test_",
 				Labels:             map[string]string{"job": "test"},
+				Registerer:         prometheus.NewRegistry(),
 			},
 			wantErr: false,
 		},
@@ -103,6 +105,7 @@ func TestReportMetric_Validation(t *testing.T) {
 		PrometheusEndpoint: apiServer.URL,
 		MetricPrefix:       "test_",
 		Labels:             map[string]string{"job": "test"},
+		Registerer:         prometheus.NewRegistry(),
 	}
 	syncer, err := New(config)
 	require.NoError(t, err)
@@ -288,6 +291,7 @@ func TestReportMetric_DryRun(t *testing.T) {
 		MetricPrefix:       "test_",
 		Labels:             map[string]string{"job": "test"},
 		DryRun:             true, // Enable dry run
+		Registerer:         prometheus.NewRegistry(),
 	}
 
 	syncer, err := New(config)
@@ -448,6 +452,7 @@ func createTestSyncerWithMocks(t *testing.T, apiHandler http.HandlerFunc, writeH
 		MetricPrefix:       "test_",
 		Labels:             map[string]string{"job": "test", "instance": "test-instance"},
 		DryRun:             false,
+		Registerer:         prometheus.NewRegistry(),
 	}
 
 	syncer, err := New(config)
